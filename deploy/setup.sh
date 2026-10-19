@@ -12,6 +12,8 @@
 #                    site goes live on the hostname configured for that tunnel (see
 #                    deploy/cloudflared.yml for the settings). If unset, the script prints how to get one.
 #   PINCODES         Pincodes to start tracking, space separated (e.g. "122003 560001").
+#   SITE_HOST        Hostname to serve over HTTPS with Caddy, no Cloudflare needed (e.g. 13-232-1-2.sslip.io
+#                    or your own domain pointing at this server). Needs inbound 80 and 443 open.
 #   SWAP_GB          Swap file size to create if the server has none (default 4).
 #   NODE_MAJOR       Node.js major version (default 24).
 
@@ -143,8 +145,8 @@ $APP_DIR/logs/*.log {
 EOF
 
 # ---------------------------------------------------------------- Cloudflare Tunnel
-say "Cloudflare Tunnel"
-if ! command -v cloudflared >/dev/null; then
+say "Publishing the site"
+if [[ -n "${CF_TUNNEL_TOKEN:-}" ]] && ! command -v cloudflared >/dev/null; then
   sudo mkdir -p --mode=0755 /usr/share/keyrings
   curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
   echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' \
@@ -152,9 +154,29 @@ if ! command -v cloudflared >/dev/null; then
   sudo apt-get update -qq
   sudo apt-get install -y -qq cloudflared >/dev/null
 fi
-ok "$(cloudflared --version | head -1)"
 
-if [[ -n "${CF_TUNNEL_TOKEN:-}" ]]; then
+if [[ -n "${SITE_HOST:-}" ]]; then
+  # No Cloudflare account needed: Caddy takes ports 80/443, gets a free Let's Encrypt certificate for
+  # SITE_HOST by itself, and forwards to the website on 127.0.0.1:3000. It stamps the visitor's real IP
+  # into CF-Connecting-IP (replacing anything the visitor sent) so the API's per-visitor rate limits work.
+  # The security group must allow inbound 80 and 443.
+  if ! command -v caddy >/dev/null; then
+    sudo apt-get install -y -qq caddy >/dev/null
+  fi
+  sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
+$SITE_HOST {
+  encode zstd gzip
+  reverse_proxy 127.0.0.1:3000 {
+    header_up CF-Connecting-IP {remote_host}
+  }
+}
+EOF
+  sudo systemctl enable caddy >/dev/null 2>&1 || true
+  sudo systemctl restart caddy
+  ok "Caddy serving https://$SITE_HOST (certificate is issued on the first visit, can take a minute)"
+  grep -q '^TRUST_CLOUDFLARE=1' .env || { echo 'TRUST_CLOUDFLARE=1' >> .env; "$PM2" restart lego-api --update-env >/dev/null; }
+elif [[ -n "${CF_TUNNEL_TOKEN:-}" ]]; then
+  ok "$(cloudflared --version | head -1)"
   if systemctl is-active --quiet cloudflared; then
     ok "tunnel service already running"
   else
@@ -163,11 +185,10 @@ if [[ -n "${CF_TUNNEL_TOKEN:-}" ]]; then
   fi
   grep -q '^TRUST_CLOUDFLARE=1' .env || { echo 'TRUST_CLOUDFLARE=1' >> .env; "$PM2" restart lego-api --update-env >/dev/null; }
 else
-  warn "No CF_TUNNEL_TOKEN given, so the site is only reachable on this server (127.0.0.1:3000)."
-  warn "To publish it: Cloudflare dashboard > Zero Trust > Networks > Tunnels > Create a tunnel,"
-  warn "add a public hostname pointing to http://localhost:3000, copy the token, then run:"
-  warn "  CF_TUNNEL_TOKEN=<token> bash deploy/setup.sh"
-  warn "Quick test without an account or domain:  cloudflared tunnel --url http://localhost:3000"
+  warn "Neither SITE_HOST nor CF_TUNNEL_TOKEN given, so the site is only reachable on this server (127.0.0.1:3000)."
+  warn "To publish it with no account: allow inbound 80 and 443 in the security group, then run:"
+  warn "  SITE_HOST=<server-ip-with-dashes>.sslip.io bash deploy/setup.sh     (or your own domain)"
+  warn "Or with Cloudflare Tunnel:  CF_TUNNEL_TOKEN=<token> bash deploy/setup.sh"
 fi
 
 # ---------------------------------------------------------------- health check
