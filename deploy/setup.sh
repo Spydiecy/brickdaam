@@ -84,10 +84,14 @@ npm ci --no-audit --no-fund
 npm ci --prefix web --no-audit --no-fund
 ok "done"
 
-say "Installing Playwright's Chromium and the system libraries it needs"
-# Google Chrome has no Linux ARM build, so the tracker uses Playwright's bundled Chromium on Linux
-# (BROWSER_CHANNEL defaults to "chromium" there; see src/browser.ts).
-npx playwright install --with-deps chromium
+say "Installing the browser and the system libraries it needs"
+# x64: real Google Chrome, which BigBasket and Zepto accept (Playwright's headless shell gets blocked).
+# ARM has no Google Chrome build, so it uses Playwright's Chromium. See src/browser.ts.
+if [[ "$ARCH" == "amd64" ]]; then
+  npx playwright install --with-deps chrome
+else
+  npx playwright install --with-deps chromium
+fi
 ok "done"
 
 # ---------------------------------------------------------------- configuration

@@ -3,11 +3,13 @@ import { chromium, type Browser, type BrowserContext } from 'playwright';
 /**
  * Which browser to drive:
  *  - macOS: the Google Chrome installed on the machine (channel "chrome").
- *  - Linux servers: Playwright's own Chromium (installed by deploy/setup.sh), since Google Chrome
- *    is not available for Linux on ARM (Oracle's free servers).
+ *  - Linux x64 servers: the real Google Chrome (installed by deploy/setup.sh). Playwright's bundled
+ *    headless shell gets blocked or served bot checks by BigBasket and Zepto; real Chrome does not.
+ *  - Linux ARM: Playwright's own Chromium, since Google Chrome has no Linux ARM build.
  * BROWSER_CHANNEL overrides this: "chrome", "chromium" (= Playwright's bundled build), "msedge", ...
  */
-const channelSetting = process.env.BROWSER_CHANNEL ?? (process.platform === 'darwin' ? 'chrome' : 'chromium');
+const defaultChannel = process.platform === 'darwin' || process.arch === 'x64' ? 'chrome' : 'chromium';
+const channelSetting = process.env.BROWSER_CHANNEL ?? defaultChannel;
 const channel = channelSetting === 'chromium' ? undefined : channelSetting;
 
 const linuxArgs =
