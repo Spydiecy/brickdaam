@@ -1,0 +1,38 @@
+{
+  "name": "lego-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Live LEGO price tracker across Indian shopping and quick-commerce platforms, per pincode",
+  "type": "module",
+  "scripts": {
+    "setup": "npm install && npm install --prefix web",
+    "build": "tsc && npm run build --prefix web",
+    "typecheck": "tsc --noEmit && npm run typecheck --prefix web",
+    "test": "tsx --test src/*.test.ts",
+    "cli": "tsx src/cli.ts",
+    "dev:api": "tsx src/api.ts",
+    "dev:worker": "tsx src/worker.ts",
+    "dev:web": "npm run dev --prefix web",
+    "start": "pm2 start ecosystem.config.cjs",
+    "live": "npm run build && pm2 startOrRestart ecosystem.config.cjs",
+    "stop": "pm2 stop ecosystem.config.cjs",
+    "restart": "pm2 restart ecosystem.config.cjs",
+    "logs": "pm2 logs",
+    "status": "pm2 status"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "better-sqlite3": "13.0.3",
+    "fastify": "5.12.7",
+    "node-cron": "4.6.0",
+    "playwright": "1.64.1",
+    "sharp": "0.35.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "26.6.5",
+    "pm2": "7.0.4",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}

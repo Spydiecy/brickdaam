@@ -1,0 +1,12 @@
+node_modules/
+dist/
+data/
+logs/
+.env
+.env.*
+.DS_Store
+web/.next/
+web/node_modules/
+web/next-env.d.ts
+*.tsbuildinfo
+!.env.example

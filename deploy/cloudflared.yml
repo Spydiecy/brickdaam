@@ -1,0 +1,37 @@
+# Cloudflare setup for the tracker.
+#
+# ── Option A (recommended): tunnel managed in the Cloudflare dashboard ───────────────────────────
+#   Zero Trust > Networks > Tunnels > Create a tunnel (type "Cloudflared")
+#   Public hostname:  <your domain or subdomain>  ->  Service  HTTP  localhost:3000
+#   Copy the token and run on the server:  CF_TUNNEL_TOKEN=<token> bash deploy/setup.sh
+#   This file is then NOT used; the dashboard holds the routing.
+#
+# ── Option B: tunnel managed from this file ──────────────────────────────────────────────────────
+#   cloudflared tunnel login
+#   cloudflared tunnel create lego-tracker            # prints the tunnel ID, writes credentials
+#   cloudflared tunnel route dns lego-tracker <hostname>
+#   sudo mkdir -p /etc/cloudflared && sudo cp deploy/cloudflared.yml /etc/cloudflared/config.yml
+#   (edit tunnel / credentials-file / hostname below), then:  sudo cloudflared service install
+#
+# ── Recommended dashboard settings (free plan), for either option ────────────────────────────────
+#   SSL/TLS            Full (the tunnel is encrypted end to end).
+#   Caching > Cache Rules:
+#     "Set photos"     URI path starts with /api/img/   -> Eligible for cache, edge TTL: respect origin
+#                      (the API sends a 30-day immutable header, so photos are served by Cloudflare).
+#     "Catalogue"      URI path equals /api/sets         -> Eligible for cache, edge TTL: respect origin
+#                      (the API sends a 15-second shared cache header, so crowds hit Cloudflare).
+#   Security > WAF > Rate limiting rules (free plan allows one):
+#     URI path equals /api/refresh and method POST, 5 requests per 1 minute per IP -> Block 10 min.
+#     The API also limits this itself; this stops floods before they reach the server.
+#   Security > Bots: Bot Fight Mode on.
+#   After publishing through Cloudflare, keep TRUST_CLOUDFLARE=1 in .env so the API's own rate
+#   limits see real visitor IPs.
+
+tunnel: <TUNNEL-ID>
+credentials-file: /home/ubuntu/.cloudflared/<TUNNEL-ID>.json
+
+ingress:
+  - hostname: <your.hostname.example>
+    service: http://localhost:3000
+  # Anything else gets a 404 instead of reaching the server.
+  - service: http_status:404
