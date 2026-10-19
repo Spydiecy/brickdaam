@@ -41,7 +41,8 @@ fi
 CODENAME="${VERSION_CODENAME:-noble}"
 ARCH="$(dpkg --print-architecture)"
 say "Setting up in $APP_DIR on $PRETTY_NAME ($ARCH)"
-sudo -v
+# Passwordless sudo (the EC2 default) needs no prompt; "sudo -v" alone asks for a password even then.
+sudo -n true 2>/dev/null || sudo -v
 
 # ---------------------------------------------------------------- system packages
 say "System packages"
