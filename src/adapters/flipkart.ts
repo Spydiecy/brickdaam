@@ -150,7 +150,9 @@ export const flipkart: Adapter = {
   minIntervalMin: 30,
 
   async fetchLegoListings(pin: Pincode): Promise<RawListing[]> {
-    const ctx = await newContext();
+    // Flipkart bounces product pages to its homepage for datacenter IPs. FLIPKART_PROXY points at the
+    // free local WARP proxy set up by deploy/warp.sh; unset on a home or office connection.
+    const ctx = await newContext({ proxy: process.env.FLIPKART_PROXY });
     try {
       // The address picker depends on a lazily loaded Google Places script and occasionally fails to
       // produce suggestions, so retry the whole step on a fresh page before giving up.

@@ -49,11 +49,13 @@ const UA_PLATFORM =
       : 'X11; Linux x86_64';
 
 /** Fresh context (clean cookies) that looks like a normal desktop Chrome in India. */
-export async function newContext(): Promise<BrowserContext> {
+export async function newContext(opts: { proxy?: string } = {}): Promise<BrowserContext> {
   const browser = await getBrowser();
   // Headless Chrome announces itself as "HeadlessChrome"; send the regular UA instead.
   const major = browser.version().split('.')[0];
   return browser.newContext({
+    // Only used for stores that block datacenter IPs (see deploy/warp.sh); unset means a direct connection.
+    ...(opts.proxy ? { proxy: { server: opts.proxy } } : {}),
     locale: 'en-IN',
     timezoneId: 'Asia/Kolkata',
     viewport: { width: 1366, height: 900 },
