@@ -5,7 +5,8 @@ import { candidatePoints } from '../geo.js';
 
 const ORIGIN = 'https://www.bigbasket.com';
 const MAX_PAGES = 20;
-const PAGE_DELAY_MS = 900;
+const PAGE_DELAY_MS = 1500;
+const BACKOFF_MS = [5000, 15000, 30000, 45000]; // waits before retrying a page that was rate limited
 
 interface InPage {
   status: number;
@@ -107,6 +108,13 @@ async function setPincode(page: Page, pincode: string): Promise<void> {
   }
 }
 
+/** Open the LEGO search page and return the response of the site's first listing call. */
+async function openSearch(page: Page) {
+  const first = page.waitForResponse((r) => r.url().includes('/listing-svc/v2/products'), { timeout: 45000 });
+  await page.goto(`${ORIGIN}/ps/?q=lego`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+  return first;
+}
+
 function toListing(p: any): RawListing | null {
   const id = String(p?.id ?? '');
   const title = String(p?.desc ?? '').trim();
@@ -148,9 +156,13 @@ export const bigbasket: Adapter = {
 
       // The search page picks the right store bucket itself; capture its first listing call
       // and reuse that exact URL for further pages.
-      const first = page.waitForResponse((r) => r.url().includes('/listing-svc/v2/products'), { timeout: 45000 });
-      await page.goto(`${ORIGIN}/ps/?q=lego`, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      const firstRes = await first;
+      // A 403 here is BigBasket throttling this IP while other stores are crawled at the same time;
+      // waiting a little and loading the page again usually gets through.
+      let firstRes = await openSearch(page);
+      for (let retry = 0; retry < BACKOFF_MS.length && firstRes.status() === 403; retry++) {
+        await page.waitForTimeout(BACKOFF_MS[retry]);
+        firstRes = await openSearch(page);
+      }
       if (!firstRes.ok()) throw new Error(`bigbasket listing returned HTTP ${firstRes.status()}`);
       const template = firstRes.url();
       let json: any = await firstRes.json();
@@ -171,10 +183,21 @@ export const bigbasket: Adapter = {
       const reportedTotal = Number(info?.total_count ?? 0);
       let pagesRead = 1;
       for (let n = 2; n <= pages; n++) {
-        await page.waitForTimeout(PAGE_DELAY_MS);
+        await page.waitForTimeout(PAGE_DELAY_MS + Math.floor(Math.random() * 700));
         const u = new URL(template);
         u.searchParams.set('page', String(n));
-        const res = await call(page, u.toString());
+        let res = await call(page, u.toString());
+        // From a datacenter IP BigBasket sometimes answers 403/429 mid-crawl. That is a rate limit,
+        // not a dead end: wait, then retry the same page. On the last retry reload the search page
+        // first, which refreshes the site's bot-check cookies.
+        for (let retry = 0; retry < BACKOFF_MS.length && (res.status === 403 || res.status === 429 || res.status >= 500); retry++) {
+          await page.waitForTimeout(BACKOFF_MS[retry]);
+          if (retry === BACKOFF_MS.length - 1) {
+            await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+            await page.waitForTimeout(4000);
+          }
+          res = await call(page, u.toString());
+        }
         // The page count is an estimate; BigBasket answers 204 (no content) past the real last page.
         if (res.status === 204) {
           pagesRead = pages;
