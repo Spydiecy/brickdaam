@@ -33,34 +33,52 @@ if [[ "$(id -u)" -eq 0 ]]; then
   echo "Run this as a normal user with sudo (e.g. ubuntu), not as root." >&2
   exit 1
 fi
-if ! grep -qi ubuntu /etc/os-release 2>/dev/null; then
-  echo "This script is written for Ubuntu. Found: $(. /etc/os-release && echo "$PRETTY_NAME")" >&2
+. /etc/os-release
+if grep -qi ubuntu /etc/os-release 2>/dev/null; then
+  DISTRO=ubuntu
+elif [[ "${ID:-}" == "amzn" ]]; then
+  DISTRO=amazon
+else
+  echo "This script supports Ubuntu and Amazon Linux 2023. Found: $PRETTY_NAME" >&2
   exit 1
 fi
-. /etc/os-release
-CODENAME="${VERSION_CODENAME:-noble}"
-ARCH="$(dpkg --print-architecture)"
+case "$(uname -m)" in
+  x86_64) ARCH=amd64 ;;
+  aarch64 | arm64) ARCH=arm64 ;;
+  *) ARCH="$(uname -m)" ;;
+esac
 say "Setting up in $APP_DIR on $PRETTY_NAME ($ARCH)"
 # Passwordless sudo (the EC2 default) needs no prompt; "sudo -v" alone asks for a password even then.
 sudo -n true 2>/dev/null || sudo -v
 
 # ---------------------------------------------------------------- system packages
 say "System packages"
-export DEBIAN_FRONTEND=noninteractive
-sudo apt-get update -qq
-# build-essential + python3: fallback compile for better-sqlite3 / sharp if no prebuilt binary fits.
+# A compiler + python3 are the fallback for building better-sqlite3 / sharp if no prebuilt binary fits.
 # unzip: pincode coordinate import. sqlite3: handy for inspecting data.
-sudo apt-get install -y -qq ca-certificates curl gnupg git build-essential python3 unzip sqlite3 logrotate >/dev/null
+if [[ "$DISTRO" == "ubuntu" ]]; then
+  export DEBIAN_FRONTEND=noninteractive
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq ca-certificates curl gnupg git build-essential python3 unzip sqlite3 logrotate >/dev/null
+else
+  # curl-minimal ships with Amazon Linux and already provides curl, so curl is not listed.
+  sudo dnf install -y -q git gcc-c++ make python3 unzip sqlite logrotate tar gzip >/dev/null
+fi
 ok "done"
 
 # ---------------------------------------------------------------- swap
 # A refresh runs every store's browser at once; swap keeps a memory spike from killing it.
 if [[ -z "$(swapon --show --noheadings)" ]]; then
   say "Creating ${SWAP_GB} GB swap file"
-  sudo fallocate -l "${SWAP_GB}G" /swapfile
+  # fallocate can leave holes on XFS (Amazon Linux), which swapon rejects; dd always works.
+  sudo fallocate -l "${SWAP_GB}G" /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=$((SWAP_GB * 1024)) status=none
   sudo chmod 600 /swapfile
-  sudo mkswap /swapfile >/dev/null
-  sudo swapon /swapfile
+  if ! sudo mkswap /swapfile >/dev/null || ! sudo swapon /swapfile 2>/dev/null; then
+    sudo swapoff /swapfile 2>/dev/null || true
+    sudo dd if=/dev/zero of=/swapfile bs=1M count=$((SWAP_GB * 1024)) status=none
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile >/dev/null
+    sudo swapon /swapfile
+  fi
   grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
   ok "swap on"
 fi
@@ -68,13 +86,18 @@ fi
 # ---------------------------------------------------------------- Node.js
 if ! command -v node >/dev/null || [[ "$(node -p 'process.versions.node.split(".")[0]')" -lt "$NODE_MAJOR" ]]; then
   say "Installing Node.js $NODE_MAJOR"
-  sudo mkdir -p /etc/apt/keyrings
-  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-    | sudo gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
-  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
-    | sudo tee /etc/apt/sources.list.d/nodesource.list >/dev/null
-  sudo apt-get update -qq
-  sudo apt-get install -y -qq nodejs >/dev/null
+  if [[ "$DISTRO" == "ubuntu" ]]; then
+    sudo mkdir -p /etc/apt/keyrings
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | sudo gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+      | sudo tee /etc/apt/sources.list.d/nodesource.list >/dev/null
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq nodejs >/dev/null
+  else
+    curl -fsSL "https://rpm.nodesource.com/setup_${NODE_MAJOR}.x" | sudo bash - >/dev/null
+    sudo dnf install -y -q nodejs >/dev/null
+  fi
 fi
 ok "node $(node -v), npm $(npm -v)"
 
@@ -87,7 +110,15 @@ ok "done"
 say "Installing the browser and the system libraries it needs"
 # x64: real Google Chrome, which BigBasket and Zepto accept (Playwright's headless shell gets blocked).
 # ARM has no Google Chrome build, so it uses Playwright's Chromium. See src/browser.ts.
-if [[ "$ARCH" == "amd64" ]]; then
+if [[ "$DISTRO" == "amazon" ]]; then
+  # Playwright's installer only knows Ubuntu/Debian, so take Google's own rpm; dnf pulls the libraries.
+  if [[ "$ARCH" != "amd64" ]]; then
+    echo "Amazon Linux on ARM has no Google Chrome build. Use an x86_64 instance, or Ubuntu on ARM." >&2
+    exit 1
+  fi
+  [[ -x /opt/google/chrome/chrome ]] || sudo dnf install -y -q https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm >/dev/null
+  ok "$(/opt/google/chrome/chrome --version)"
+elif [[ "$ARCH" == "amd64" ]]; then
   npx playwright install --with-deps chrome
 else
   npx playwright install --with-deps chromium
@@ -151,6 +182,10 @@ EOF
 
 # ---------------------------------------------------------------- Cloudflare Tunnel
 say "Publishing the site"
+if [[ -n "${CF_TUNNEL_TOKEN:-}" && "$DISTRO" != "ubuntu" ]]; then
+  echo "CF_TUNNEL_TOKEN is only wired up for Ubuntu in this script. On Amazon Linux use SITE_HOST (Caddy)." >&2
+  exit 1
+fi
 if [[ -n "${CF_TUNNEL_TOKEN:-}" ]] && ! command -v cloudflared >/dev/null; then
   sudo mkdir -p --mode=0755 /usr/share/keyrings
   curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
@@ -166,8 +201,36 @@ if [[ -n "${SITE_HOST:-}" ]]; then
   # into CF-Connecting-IP (replacing anything the visitor sent) so the API's per-visitor rate limits work.
   # The security group must allow inbound 80 and 443.
   if ! command -v caddy >/dev/null; then
-    sudo apt-get install -y -qq caddy >/dev/null
+    if [[ "$DISTRO" == "ubuntu" ]]; then
+      sudo apt-get install -y -qq caddy >/dev/null
+    else
+      # Amazon Linux has no caddy package: use the official static binary and a systemd unit.
+      sudo curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=${ARCH}" -o /usr/local/bin/caddy
+      sudo chmod 755 /usr/local/bin/caddy
+      id caddy >/dev/null 2>&1 || sudo useradd --system --home-dir /var/lib/caddy --create-home --shell /sbin/nologin caddy
+      sudo mkdir -p /etc/caddy
+      sudo tee /etc/systemd/system/caddy.service >/dev/null <<'UNIT'
+[Unit]
+Description=Caddy web server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=caddy
+Group=caddy
+ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Restart=on-abnormal
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+      sudo systemctl daemon-reload
+    fi
   fi
+  sudo mkdir -p /etc/caddy
   sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 $SITE_HOST {
   encode zstd gzip

@@ -58,6 +58,9 @@ export async function ensurePincode(pincode: string): Promise<Pincode> {
 
   // Prefer GeoNames' district name: it is a real city/district, not a ward label.
   if (geo) found.city = geo.city;
-  db.prepare('INSERT INTO pincodes (pincode, city, lat, lng) VALUES (@pincode, @city, @lat, @lng)').run(found);
+  // A newly added pincode counts as just viewed, so the scheduled crawls pick it up straight away.
+  db.prepare(
+    "INSERT INTO pincodes (pincode, city, lat, lng, last_viewed_at) VALUES (@pincode, @city, @lat, @lng, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+  ).run(found);
   return found;
 }
