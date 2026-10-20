@@ -1,9 +1,13 @@
+import { execFile } from 'node:child_process';
 import { NotServiceableError, type Adapter, type Pincode, type RawListing } from '../types.js';
 import { newContext } from '../browser.js';
 
 const ORIGIN = 'https://blinkit.com';
 const MAX_PAGES = 30;
 const PAGE_DELAY_MS = 700;
+// Only about 4 in 10 calls to the Worker get through (Blinkit refuses some of Cloudflare's outgoing
+// addresses), so a page is asked for up to this many times. 20 tries fail only about 1 in 100,000 pages.
+const WORKER_TRIES = 20;
 
 // Headers the browser sets itself (or that fetch() refuses to set).
 const SKIP_HEADERS = /^(:|host$|content-length$|cookie$|origin$|referer$|user-agent$|accept-encoding$|connection$|priority$|sec-)/i;
@@ -47,12 +51,78 @@ function extract(json: any): RawListing[] {
   return out;
 }
 
+/** GET a URL with the system curl. Returns status 0 if curl itself failed (timeout, no network). */
+function curlGet(url: string, headers: Record<string, string>): Promise<{ status: number; body: string }> {
+  const args = ['-s', '-m', '30', '-w', '\n%{http_code}'];
+  for (const [k, v] of Object.entries(headers)) args.push('-H', `${k}: ${v}`);
+  args.push(url);
+  return new Promise((resolve) => {
+    execFile('curl', args, { maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
+      if (err && !stdout) return resolve({ status: 0, body: '' });
+      const i = stdout.lastIndexOf('\n');
+      resolve({ status: Number(stdout.slice(i + 1)) || 0, body: stdout.slice(0, i) });
+    });
+  });
+}
+
+/**
+ * Blinkit's firewall blocks cloud servers (AWS) but accepts requests that start inside Cloudflare's
+ * network. With BLINKIT_WORKER_URL set, the search requests go through a free Cloudflare Worker
+ * (deploy/blinkit-worker.js) that forwards them; this code still does the paging and parsing.
+ */
+async function viaWorker(pin: Pincode, workerUrl: string, key: string): Promise<RawListing[]> {
+  const get = async (next?: string) => {
+    const u = new URL(workerUrl);
+    u.searchParams.set('lat', String(pin.lat));
+    u.searchParams.set('lon', String(pin.lng));
+    if (next) u.searchParams.set('next', next);
+    // Blinkit refuses some of Cloudflare's outgoing addresses and accepts others, and each call to the
+    // Worker leaves from a different one. A 403 therefore just means "bad address this time": ask again.
+    // The call is made with curl: Node's own fetch is refused every time from the same machine, while
+    // curl gets through most of the time (found by testing; Cloudflare judges the two clients differently).
+    let status = 0;
+    for (let attempt = 0; attempt < WORKER_TRIES; attempt++) {
+      if (attempt) await new Promise((r) => setTimeout(r, Math.min(300 * attempt, 1500)));
+      const res = await curlGet(u.toString(), { 'x-key': key });
+      status = res.status;
+      if (status === 400) throw new NotServiceableError(`blinkit does not serve (${pin.lat}, ${pin.lng})`);
+      if (status === 200) {
+        try {
+          return JSON.parse(res.body);
+        } catch {
+          status = 502; // not JSON: treat like a bad answer and ask again
+        }
+      }
+      if (status !== 403 && status !== 0 && status < 500) break;
+    }
+    throw new Error(`blinkit (via worker) returned HTTP ${status}`);
+  };
+
+  const byId = new Map<string, RawListing>();
+  let json = await get();
+  let next: string | undefined;
+  for (let i = 0; ; i++) {
+    for (const l of extract(json)) byId.set(l.platformProductId, l);
+    next = json?.response?.pagination?.next_url;
+    if (!next || i >= MAX_PAGES) break;
+    await new Promise((r) => setTimeout(r, PAGE_DELAY_MS));
+    json = await get(next);
+  }
+  return [...byId.values()];
+}
+
 export const blinkit: Adapter = {
   id: 'blinkit',
   name: 'Blinkit',
   locationKey: 'coordinates',
+  // Through the Worker a crawl costs about 40 calls, and the free plan allows 100,000 a day, so crawl
+  // each pincode every 15 minutes at most. Direct browser crawls keep the normal 5 minute pace.
+  ...(process.env.BLINKIT_WORKER_URL ? { minIntervalMin: 15 } : {}),
 
   async fetchLegoListings(pin: Pincode): Promise<RawListing[]> {
+    const workerUrl = process.env.BLINKIT_WORKER_URL;
+    if (workerUrl) return viaWorker(pin, workerUrl, process.env.BLINKIT_WORKER_KEY ?? '');
+
     const ctx = await newContext();
     try {
       await ctx.addCookies([

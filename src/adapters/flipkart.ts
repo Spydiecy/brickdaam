@@ -86,13 +86,20 @@ function parseCards(page: Page): Promise<ParsedCard[]> {
 export async function setPincode(page: Page, pincode: string): Promise<void> {
   await page.goto(`${ORIGIN}/search?q=lego`, { waitUntil: 'domcontentloaded', timeout: 45000 });
   await page.waitForSelector('a[href*="/p/itm"]', { timeout: 20000 });
-  const productUrl = await page.$eval('a[href*="/p/itm"]', (a) => (a as HTMLAnchorElement).href);
-  await page.goto(productUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+  const productUrls = await page.$$eval('a[href*="/p/itm"]', (as) => [...new Set(as.map((a) => (a as HTMLAnchorElement).href))].slice(0, 4));
 
   // Clicking before the page has hydrated does nothing, so retry until the panel actually opens.
   const trigger = page.getByText('Select delivery location', { exact: true }).first();
   const box = page.locator('input[placeholder*="Search by area"]').first();
-  await trigger.waitFor({ timeout: 20000 });
+  // From a server address Flipkart sometimes bounces a product page to its homepage, which has no
+  // delivery picker. Another product page usually loads normally, so try a few before giving up.
+  let found = false;
+  for (const productUrl of productUrls) {
+    await page.goto(productUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    found = await trigger.waitFor({ timeout: 12000 }).then(() => true, () => false);
+    if (found) break;
+  }
+  if (!found) throw new Error('flipkart: no product page showed the delivery picker (redirected to the homepage?)');
   let opened = false;
   for (let attempt = 0; attempt < 5 && !opened; attempt++) {
     await page.waitForTimeout(2500);

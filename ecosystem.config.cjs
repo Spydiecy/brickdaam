@@ -53,7 +53,7 @@ module.exports = {
         ...shared,
         SCRAPE_CRON: env.SCRAPE_CRON ?? '*/5 * * * *',
         SCRAPE_CONCURRENCY: env.SCRAPE_CONCURRENCY ?? '2',
-        ...pick(['SLOW_SCRAPE_CRON', 'LIVE_CONCURRENCY', 'ACTIVE_DAYS', 'FLIPKART_PROXY']),
+        ...pick(['SLOW_SCRAPE_CRON', 'LIVE_CONCURRENCY', 'ACTIVE_DAYS', 'FLIPKART_PROXY', 'BLINKIT_WORKER_URL', 'BLINKIT_WORKER_KEY']),
       },
       // Chrome runs in its own processes; this caps the worker's Node side only.
       max_memory_restart: '1200M',
