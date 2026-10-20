@@ -187,19 +187,25 @@ export const flipkart: Adapter = {
       const results = await Promise.allSettled(
         SORTS.map(async (sort, i) => {
           await tabs[i].waitForTimeout(i * 800);
-          return (await crawlSort(tabs[i], sort, byPid)).total;
+          return crawlSort(tabs[i], sort, byPid);
         }),
       );
-      const ok = results.filter((r): r is PromiseFulfilledResult<number | null> => r.status === 'fulfilled');
+      const ok = results.filter(
+        (r): r is PromiseFulfilledResult<{ total: number | null; endedBeforeTotal: boolean }> => r.status === 'fulfilled',
+      );
       // One sort order cut short (a page that would not render) is fine as long as the others got
       // through: the union check below still guards against a partial picture.
       if (ok.length === 0) throw (results[0] as PromiseRejectedResult).reason;
-      for (const r of ok) reportedTotal = Math.max(reportedTotal ?? 0, r.value ?? 0) || reportedTotal;
+      for (const r of ok) reportedTotal = Math.max(reportedTotal ?? 0, r.value.total ?? 0) || reportedTotal;
+      // When all three sort orders read every page Flipkart would list and each ended on the empty
+      // "Showing N+1 – N" page, the three views agree on the real range and the announced total is
+      // just inflated by repeated sponsored slots, so it is not a fair yardstick.
+      const allListedToTheEnd = ok.length === SORTS.length && ok.every((r) => r.value.endedBeforeTotal);
 
       if (byPid.size === 0) throw new Error('flipkart returned no LEGO products (layout change or block)');
       // The reported total counts repeated sponsored slots, so allow some slack, but a union far
       // below it means pages went missing and must not be stored as a complete picture.
-      if (reportedTotal != null && byPid.size < reportedTotal * MIN_UNION_OF_TOTAL) {
+      if (!allListedToTheEnd && reportedTotal != null && byPid.size < reportedTotal * MIN_UNION_OF_TOTAL) {
         throw new Error(`flipkart: found ${byPid.size} products but the site reports ${reportedTotal} results`);
       }
       return [...byPid.values()];
@@ -214,9 +220,10 @@ async function crawlSort(
   page: Page,
   sort: string,
   into: Map<string, RawListing>,
-): Promise<{ total: number | null }> {
+): Promise<{ total: number | null; endedBeforeTotal: boolean }> {
   let total: number | null = null;
   let reachedEnd = false;
+  let endedBeforeTotal = false;
   for (let n = 1; n <= MAX_PAGES; n++) {
     if (n > 1) await page.waitForTimeout(PAGE_DELAY_MS);
     await page.goto(`${SEARCH}${sort ? `&sort=${sort}` : ''}&page=${n}`, {
@@ -246,7 +253,16 @@ async function crawlSort(
     if (process.env.DEBUG_FLIPKART) {
       console.log(`[flipkart] sort=${sort || 'relevance'} page ${n}: ${header?.[0]} cards=${cards.length}/${slots}`);
     }
-    if (cards.length === 0) break;
+    if (cards.length === 0) {
+      // Flipkart's "N results" counts repeated sponsored slots, so the listing can end well before it
+      // (e.g. 13 full pages of a "799 results" search, then an empty "Showing 521 – 520 of 799").
+      // That header, directly after full pages, is the real end, unlike a throttled empty page.
+      if (header && n > 1 && Number(header[1]) === Number(header[2]) + 1 && Number(header[2]) === (n - 1) * 40) {
+        reachedEnd = true;
+        endedBeforeTotal = true;
+      }
+      break;
+    }
     // A page that shows fewer cards than it announces was not fully read.
     if (slots != null && cards.length < Math.ceil(slots * MIN_FILLED)) {
       throw new Error(`flipkart page ${n} showed ${cards.length} of ${slots} cards (lazy rendering did not finish)`);
@@ -271,5 +287,5 @@ async function crawlSort(
     }
   }
   if (!reachedEnd) throw new Error(`flipkart: sort "${sort || 'relevance'}" stopped before the last result page`);
-  return { total };
+  return { total, endedBeforeTotal };
 }
