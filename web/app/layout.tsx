@@ -13,9 +13,17 @@ const hindi = Noto_Sans_Devanagari({
   display: 'swap',
 });
 
+// Public address, used for share previews and the sitemap. Set SITE_URL at build time to change it.
+const SITE_URL = process.env.SITE_URL ?? 'https://brickdaam.duckdns.org';
+const TITLE = 'Brick Daam · LEGO prices across Indian stores';
+const DESCRIPTION = 'Live LEGO set prices from Blinkit, Zepto, Amazon, Flipkart and more, for your pincode.';
+
 export const metadata: Metadata = {
-  title: 'Brick Daam · LEGO prices across Indian stores',
-  description: 'Live LEGO set prices from Blinkit, Zepto, Amazon, Flipkart and more, for your pincode.',
+  metadataBase: new URL(SITE_URL),
+  title: TITLE,
+  description: DESCRIPTION,
+  openGraph: { title: TITLE, description: DESCRIPTION, siteName: 'Brick Daam', type: 'website', locale: 'en_IN' },
+  twitter: { card: 'summary_large_image', title: TITLE, description: DESCRIPTION },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

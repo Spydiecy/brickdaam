@@ -45,7 +45,8 @@ export default {
         app_client: 'consumer_web',
         app_version: '1010101010',
         auth_key: 'c761ec3633c22afad934fb17a66385c1c06c5472b4898b866b7306186d0bb477',
-        device_id: 'c0b980672d185a92',
+        // A fresh id per call: one fixed id behind thousands of requests looks like a bot.
+        device_id: crypto.randomUUID().replace(/-/g, '').slice(0, 16),
         lat,
         lon,
         rn_bundle_version: '1009003012',

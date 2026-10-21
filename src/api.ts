@@ -32,9 +32,12 @@ function limited(reply: any, retryAfterSec: number, what: string) {
 }
 
 // Every request: a generous per-visitor ceiling so one client can not flood the API.
+// A page view loads about 50 set photos, and many mobile users share one address (carrier NAT), so
+// photos get their own, larger allowance; everything else keeps the tighter one.
 app.addHook('onRequest', async (req, reply) => {
   if (req.url === '/health') return;
-  const r = hit(`all:${clientIp(req)}`, 600, 60_000);
+  const photo = req.url.startsWith('/api/img/');
+  const r = hit(`${photo ? 'img' : 'all'}:${clientIp(req)}`, photo ? 6000 : 600, 60_000);
   if (!r.ok) return limited(reply, r.retryAfterSec, 'requests');
 });
 

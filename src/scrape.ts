@@ -8,6 +8,25 @@ import { NotServiceableError, type Adapter, type Pincode, type RawListing } from
 // How many (platform, pincode) crawls run at the same time.
 const CONCURRENCY = Math.max(1, Number(process.env.SCRAPE_CONCURRENCY ?? 2));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Consecutive failures per "platform:pincode" and the time before which scheduled runs skip it.
+// Kept in memory: a worker restart gives every store a fresh start, which is fine.
+const failStreak = new Map<string, number>();
+const coolDownUntil = new Map<string, number>();
+const REST_MINUTES = [30, 60, 120, 240]; // after the 1st, 2nd, 3rd, 4th+ failure in a row
+
+/** Remember how a crawl ended (any crawl, scheduled or live) so scheduled runs can rest failing stores. */
+function noteOutcome(platform: string, pincode: string, ok: boolean): void {
+  const key = `${platform}:${pincode}`;
+  if (ok) {
+    failStreak.delete(key);
+    coolDownUntil.delete(key);
+    return;
+  }
+  const n = (failStreak.get(key) ?? 0) + 1;
+  failStreak.set(key, n);
+  coolDownUntil.set(key, Date.now() + REST_MINUTES[Math.min(n, REST_MINUTES.length) - 1] * 60_000);
+}
 const liveRunning = db.prepare("SELECT 1 FROM refresh_jobs WHERE pincode = ? AND status = 'running'");
 /** Scheduled crawls cover pincodes viewed within this many days. */
 const ACTIVE_DAYS = Number(process.env.ACTIVE_DAYS ?? 7);
@@ -257,7 +276,13 @@ export async function runScrape(opts: ScrapeOptions = {}): Promise<void> {
   const started = Date.now();
 
   // Small pool: CONCURRENCY crawls at a time, each with a short stagger.
-  const queue = [...tasks];
+  // Scheduled runs only: a store that keeps failing for a pincode (usually a block on the server's
+  // address) is left alone for a growing time instead of being hit again every few minutes, which
+  // only makes blocks last longer. The "Fetch live rates" button always tries every store.
+  const scheduled = !!opts.lane && !opts.force;
+  const queue = tasks.filter((t) => !scheduled || (coolDownUntil.get(`${t.adapter.id}:${t.pin.pincode}`) ?? 0) <= Date.now());
+  const skipped = tasks.length - queue.length;
+  if (skipped > 0) console.log(`[scrape] resting ${skipped} crawl(s) after repeated failures`);
   const lane = async (index: number) => {
     await sleep(index * 1500);
     for (let t = queue.shift(); t; t = queue.shift()) {
@@ -267,6 +292,7 @@ export async function runScrape(opts: ScrapeOptions = {}): Promise<void> {
           // Run the crawl first: inside `onProgress?.(...)` the argument would be skipped
           // entirely whenever no callback is passed (the scheduled runs).
           const result = await scrapeOne(t.adapter, t.pin, catalog);
+          noteOutcome(t.adapter.id, t.pin.pincode, true);
           opts.onProgress?.(t.adapter.id, result);
         } catch (err) {
           // Sites fail now and then for reasons that clear on a second try (timeouts, a slow page,
@@ -276,9 +302,11 @@ export async function runScrape(opts: ScrapeOptions = {}): Promise<void> {
           console.log(`[scrape] ${t.adapter.id} ${t.pin.pincode} failed once, retrying: ${msg}`);
           await sleep(TRANSIENT.test(msg) ? 15_000 : 5_000);
           const result = await scrapeOne(t.adapter, t.pin, catalog);
+          noteOutcome(t.adapter.id, t.pin.pincode, true);
           opts.onProgress?.(t.adapter.id, result);
         }
       } catch (err) {
+        noteOutcome(t.adapter.id, t.pin.pincode, false);
         const message = (err as Error).message.split('\n')[0];
         console.error(`[scrape] ${t.adapter.id} ${t.pin.pincode} failed:`, message);
         opts.onProgress?.(t.adapter.id, { state: 'failed', error: message });
